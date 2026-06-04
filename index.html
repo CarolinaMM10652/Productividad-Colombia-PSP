@@ -4614,10 +4614,10 @@ function renderMedicosTable(filtered) {
       html += `<td style="padding-left:20px;">${doc.name}</td>`;
       for (const k of months) {
         const v = doc.byMonth.get(k) || 0;
-        const bg = v > 0 ? \`rgba(8,145,178,\${0.05+Math.min(1,v/20)*0.25})\` : 'transparent';
-        html += \`<td class="num" style="background:\${bg}">\${v>0?formatNumber(v):''}</td>\`;
+        const bg = v > 0 ? `rgba(8,145,178,${0.05+Math.min(1,v/20)*0.25})` : 'transparent';
+        html += `<td class="num" style="background:${bg}">${v>0?formatNumber(v):''}</td>`;
       }
-      html += \`<td class="num" style="background:#eef2f7;font-weight:700;color:#1a3a5c">\${formatNumber(doc.total)}</td>\`;
+      html += `<td class="num" style="background:#eef2f7;font-weight:700;color:#1a3a5c">${formatNumber(doc.total)}</td>`;
       html += '</tr>';
     }
 
@@ -4625,27 +4625,262 @@ function renderMedicosTable(filtered) {
     html += `<tr class="city-total-row" data-city="${cityId}"><td style="padding-left:20px;font-style:italic;">Subtotal ${city}</td>`;
     for (const k of months) {
       const colSum = cityDocs.reduce((s,d)=>s+(d.byMonth.get(k)||0),0);
-      html += \`<td class="num">\${colSum>0?formatNumber(colSum):''}</td>\`;
+      html += `<td class="num">${colSum>0?formatNumber(colSum):''}</td>`;
     }
-    html += \`<td class="num">\${formatNumber(cityTotal)}</td></tr>\`;
+    html += `<td class="num">${formatNumber(cityTotal)}</td></tr>`;
   }
 
   // Grand total
   html += '<tr style="background:#d8e8f5;font-weight:700;color:#1a3a5c;border-top:3px solid #1a3a5c;"><td>Total general</td>';
   for (const k of months) {
     const colTotal = sortedCities.reduce((s,city)=>s+Object.values(byCity[city]).reduce((ss,d)=>ss+(d.byMonth.get(k)||0),0),0);
-    html += \`<td class="num">\${formatNumber(colTotal)}</td>\`;
+    html += `<td class="num">${formatNumber(colTotal)}</td>`;
   }
   const grandTotal = Object.values(cityTotals).reduce((s,x)=>s+x,0);
-  html += \`<td class="num">\${formatNumber(grandTotal)}</td></tr>\`;
+  html += `<td class="num">${formatNumber(grandTotal)}</td></tr>`;
+
+  html += '</tbody>';
+  document.getElementById('medicosTable').innerHTML = html;
+}
+
+
+function renderVisitKPIs(filtered) {
+  const total = filtered.length;
+  const realizadas = filtered.filter(v => v.estado === 'Realizada').length;
+  const fallidas = filtered.filter(v => v.estado === 'Fallida').length;
+  const programadas = filtered.filter(v => v.estado === 'Programada').length;
+  const pct = total > 0 ? (100 * realizadas / total).toFixed(1) + '%' : '-';
+  const kpis = [
+    {label:'Total visitas', value: formatNumber(total), sub: '', cls:''},
+    {label:'Realizadas', value: formatNumber(realizadas), sub: pct + ' del total', cls:'accent-in'},
+    {label:'Fallidas', value: formatNumber(fallidas), sub: '', cls:''},
+    {label:'Programadas (pendientes)', value: formatNumber(programadas), sub: '', cls:''}
+  ];
+  document.getElementById('visit-kpis').innerHTML = kpis.map(k =>
+    `<div class="kpi ${k.cls}"><div class="kpi-label">${k.label}</div><div class="kpi-value">${k.value}</div><div class="kpi-sub">${k.sub}</div></div>`
+  ).join('');
+}
+
+function renderVisitMonthChart(filtered) {
+  const byMonth = {};
+  for (const v of filtered) {
+    if (!v.yr || !v.mo) continue;
+    const k = v.yr * 100 + v.mo;
+    if (!byMonth[k]) byMonth[k] = {Programada:0, Realizada:0, Fallida:0};
+    if (byMonth[k][v.estado] !== undefined) byMonth[k][v.estado]++;
+  }
+  const keys = Object.keys(byMonth).map(Number).sort();
+  const labels = keys.map(k => MONTH_NAMES_ES[k%100 - 1] + " '" + String(Math.floor(k/100)).slice(-2));
+  const datasets = ['Realizada','Programada','Fallida'].map(est => ({
+    label: est,
+    data: keys.map(k => byMonth[k][est]),
+    backgroundColor: ESTADO_COLORS[est]
+  }));
+  if (visitMonthChart) visitMonthChart.destroy();
+  visitMonthChart = new Chart(document.getElementById('visitsByMonthChart'), {
+    type:'bar',
+    data:{labels, datasets},
+    options: {
+      ...stackedOptions(),
+      onClick(e, els) {
+        if (!els.length) return;
+        const est = datasets[els[0].datasetIndex].label;
+        chartFilter.estado = chartFilter.estado === est ? null : est;
+        updateChartFilterBar();
+        refreshVisitas();
+      },
+      plugins: {
+        ...(stackedOptions().plugins||{}),
+        tooltip: { ...(stackedOptions().plugins?.tooltip||{}),
+          callbacks: { footer: () => 'Clic para filtrar por este estado' }
+        }
+      }
+    }
+  });
+  document.getElementById('visitsByMonthChart').style.cursor = 'pointer';
+}
+
+function renderVisitDurationChart(filtered) {
+  const realized = filtered.filter(v => v.estado === 'Realizada');
+  const byProgram = {};
+  for (const v of realized) {
+    for (const p of v.programs) {
+      if (!byProgram[p]) byProgram[p] = {sum:0, cnt:0};
+      byProgram[p].sum += (v.dur || 0);
+      byProgram[p].cnt += 1;
+    }
+  }
+  const items = Object.entries(byProgram)
+    .map(([name, d]) => ({name, avg: d.cnt>0 ? d.sum/d.cnt : 0, cnt: d.cnt}))
+    .filter(x => x.cnt > 0)
+    .sort((a,b) => b.avg - a.avg);
+  if (visitDurationChart) visitDurationChart.destroy();
+  visitDurationChart = new Chart(document.getElementById('visitDurationChart'), {
+    type:'bar',
+    data:{
+      labels: items.map(x => x.name),
+      datasets:[{
+        label:'Minutos promedio',
+        data: items.map(x => Math.round(x.avg*10)/10),
+        backgroundColor:'#2563eb',
+        borderRadius: 3
+      }]
+    },
+    options:{
+      indexAxis: 'y',
+      responsive: true, maintainAspectRatio: false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{callbacks:{label:(ctx) => {
+          const it = items[ctx.dataIndex];
+          return `${it.avg.toFixed(1)} min/visita (${formatNumber(it.cnt)} visitas)`;
+        }}}
+      },
+      onClick(e, els) {
+        if (!els.length) return;
+        const prog = items[els[0].index].name;
+        chartFilter.program = chartFilter.program === prog ? null : prog;
+        updateChartFilterBar();
+        refreshVisitas();
+      },
+      scales:{
+        x:{beginAtZero:true, grid:{color:'#eee'}, ticks:{callback:v => v+'m'}},
+        y:{grid:{display:false}, ticks:{color:'#444', font:{size:11}}}
+      }
+    }
+  });
+  document.getElementById('visitDurationChart').style.cursor = 'pointer';
+}
+
+
+function buildMonthTable(rows, valueGetter, headerCellExtra='') {
+  // rows: array of {name, byMonth (Map<key, count>), total}
+  const monthSet = new Set();
+  rows.forEach(r => [...r.byMonth.keys()].forEach(k => monthSet.add(k)));
+  const months = [...monthSet].sort();
+  let thead = '<thead><tr><th>Nombre</th>';
+  months.forEach(k => { thead += `<th class="num">${MONTH_NAMES_ES[k%100-1]} '${String(Math.floor(k/100)).slice(-2)}</th>`; });
+  thead += '<th class="num">Total</th>' + headerCellExtra + '</tr></thead>';
+  let tbody = '<tbody>';
+  for (const r of rows) {
+    tbody += `<tr><td>${r.name}</td>`;
+    for (const k of months) {
+      const v = r.byMonth.get(k) || 0;
+      const bg = v > 0 ? `rgba(8, 145, 178, ${0.05 + Math.min(1, v/20) * 0.25})` : 'transparent';
+      tbody += `<td class="num" style="background:${bg}">${v>0?formatNumber(v):''}</td>`;
+    }
+    tbody += `<td class="num" style="background:#eef2f7;font-weight:700;color:#1a3a5c">${formatNumber(r.total)}</td>`;
+    if (r.extra) tbody += `<td>${r.extra}</td>`;
+    tbody += '</tr>';
+  }
+  tbody += '</tbody>';
+  // Footer with column totals
+  let tfoot = '<tfoot><tr><td>Total</td>';
+  let grandTotal = 0;
+  for (const k of months) {
+    const colTotal = rows.reduce((s, r) => s + (r.byMonth.get(k) || 0), 0);
+    grandTotal += colTotal;
+    tfoot += `<td class="num">${formatNumber(colTotal)}</td>`;
+  }
+  tfoot += `<td class="num">${formatNumber(grandTotal)}</td>`;
+  if (rows[0] && rows[0].extra) tfoot += '<td></td>';
+  tfoot += '</tr></tfoot>';
+  return thead + tbody + tfoot;
+}
+
+function renderEmbajadorasTable(filtered) {
+  const realized = filtered.filter(v => v.estado === 'Realizada');
+  const byEmb = {};
+  for (const v of realized) {
+    if (!byEmb[v.owner]) byEmb[v.owner] = { name: v.owner, byMonth: new Map(), total: 0 };
+    const k = v.yr*100 + v.mo;
+    byEmb[v.owner].byMonth.set(k, (byEmb[v.owner].byMonth.get(k)||0) + 1);
+    byEmb[v.owner].total++;
+  }
+  const rows = Object.values(byEmb).sort((a,b) => b.total - a.total);
+  document.getElementById('embajadorasTable').innerHTML = buildMonthTable(rows);
+}
+
+function renderMedicosTable(filtered) {
+  const realized = filtered.filter(v => v.estado === 'Realizada');
+
+  // Group by city → doctor
+  const byCity = {};
+  for (const v of realized) {
+    const city = v.city || '(sin ciudad)';
+    if (!byCity[city]) byCity[city] = {};
+    if (!byCity[city][v.medico]) byCity[city][v.medico] = { name: v.medico, byMonth: new Map(), total: 0 };
+    const k = v.yr*100 + v.mo;
+    byCity[city][v.medico].byMonth.set(k, (byCity[city][v.medico].byMonth.get(k)||0) + 1);
+    byCity[city][v.medico].total++;
+  }
+
+  // Collect all months across all data
+  const monthSet = new Set();
+  for (const city of Object.keys(byCity))
+    for (const med of Object.values(byCity[city]))
+      med.byMonth.forEach((_, k) => monthSet.add(k));
+  const months = [...monthSet].sort();
+
+  // Sort cities by total desc
+  const cityTotals = {};
+  for (const [city, docs] of Object.entries(byCity))
+    cityTotals[city] = Object.values(docs).reduce((s,d)=>s+d.total,0);
+  const sortedCities = Object.keys(byCity).sort((a,b)=>cityTotals[b]-cityTotals[a]);
+
+  // Build table HTML
+  let html = '<thead><tr><th>Ciudad / Médico</th>';
+  months.forEach(k => { html += `<th class="num">${MONTH_NAMES_ES[k%100-1]} '${String(Math.floor(k/100)).slice(-2)}</th>`; });
+  html += '<th class="num">Total</th></tr></thead><tbody>';
+
+  for (const city of sortedCities) {
+    const cityDocs = Object.values(byCity[city]).sort((a,b)=>b.total-a.total);
+    const cityId = 'city-' + city.replace(/[^a-zA-Z0-9]/g,'_');
+    const cityTotal = cityTotals[city];
+
+    // City header row
+    html += `<tr class="city-group-row" onclick="toggleCityGroup('${cityId}')">`;
+    html += `<td colspan="${months.length + 2}"><span class="city-toggle">▾</span>${city} <span style="font-weight:400;opacity:0.75;font-size:11px;">(${cityTotal} visitas)</span></td>`;
+    html += '</tr>';
+
+    // Doctor rows
+    for (const doc of cityDocs) {
+      html += `<tr class="city-doctor-row" data-city="${cityId}">`;
+      html += `<td style="padding-left:20px;">${doc.name}</td>`;
+      for (const k of months) {
+        const v = doc.byMonth.get(k) || 0;
+        const bg = v > 0 ? `rgba(8,145,178,${0.05+Math.min(1,v/20)*0.25})` : 'transparent';
+        html += `<td class="num" style="background:${bg}">${v>0?formatNumber(v):''}</td>`;
+      }
+      html += `<td class="num" style="background:#eef2f7;font-weight:700;color:#1a3a5c">${formatNumber(doc.total)}</td>`;
+      html += '</tr>';
+    }
+
+    // City subtotal row
+    html += `<tr class="city-total-row" data-city="${cityId}"><td style="padding-left:20px;font-style:italic;">Subtotal ${city}</td>`;
+    for (const k of months) {
+      const colSum = cityDocs.reduce((s,d)=>s+(d.byMonth.get(k)||0),0);
+      html += `<td class="num">${colSum>0?formatNumber(colSum):''}</td>`;
+    }
+    html += `<td class="num">${formatNumber(cityTotal)}</td></tr>`;
+  }
+
+  // Grand total
+  html += '<tr style="background:#d8e8f5;font-weight:700;color:#1a3a5c;border-top:3px solid #1a3a5c;"><td>Total general</td>';
+  for (const k of months) {
+    const colTotal = sortedCities.reduce((s,city)=>s+Object.values(byCity[city]).reduce((ss,d)=>ss+(d.byMonth.get(k)||0),0),0);
+    html += `<td class="num">${formatNumber(colTotal)}</td>`;
+  }
+  const grandTotal = Object.values(cityTotals).reduce((s,x)=>s+x,0);
+  html += `<td class="num">${formatNumber(grandTotal)}</td></tr>`;
 
   html += '</tbody>';
   document.getElementById('medicosTable').innerHTML = html;
 }
 
 function toggleCityGroup(cityId) {
-  const rows = document.querySelectorAll(\`[data-city="\${cityId}"]\`);
-  const groupRow = document.querySelector(\`.city-group-row[onclick*="\${cityId}"]\`);
+  const rows = document.querySelectorAll(`[data-city="${cityId}"]`);
+  const groupRow = document.querySelector(`.city-group-row[onclick*="${cityId}"]`);
   const isHidden = rows[0] && rows[0].classList.contains('hidden');
   rows.forEach(r => r.classList.toggle('hidden', !isHidden));
   if (groupRow) groupRow.classList.toggle('collapsed', !isHidden);
