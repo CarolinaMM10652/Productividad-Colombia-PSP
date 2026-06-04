@@ -101,6 +101,16 @@
   .sat-noaplica { background: #f3f4f6; color: #6b7280; }
   .sat-zero { background: transparent; color: #ccc; }
 
+
+  /* === Chart filter active state === */
+  .chart-active-badge { display:inline-flex; align-items:center; gap:5px; background:#1a3a5c; color:#fff; font-size:11px; padding:3px 10px; border-radius:12px; margin:4px 3px 0; }
+  .chart-active-badge button { background:none; border:none; color:#fff; cursor:pointer; font-size:13px; line-height:1; padding:0; margin-left:2px; }
+  .chart-filter-bar { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-top:8px; min-height:0; }
+  .clear-btn { background:#dc2626; color:#fff; border:none; border-radius:5px; padding:7px 16px; font-size:12px; font-weight:600; cursor:pointer; margin-left:auto; transition:background 0.15s; }
+  .clear-btn:hover { background:#b91c1c; }
+  .charts-2col { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }
+  @media (max-width:900px) { .charts-2col { grid-template-columns:1fr; } }
+
   @media (max-width: 1100px) {
     .visit-filters { grid-template-columns: repeat(2, 1fr); }
     .visit-kpi-grid { grid-template-columns: repeat(2, 1fr); }
@@ -264,6 +274,10 @@
           </div>
         </div>
       </div>
+      <div style="display:flex;align-items:center;margin-top:10px;flex-wrap:wrap;gap:6px;">
+        <div class="chart-filter-bar" id="chart-filter-bar"></div>
+        <button class="clear-btn" onclick="clearAllFilters()">✕ Limpiar filtros</button>
+      </div>
     </div>
 
     <div class="card">
@@ -276,6 +290,19 @@
       <div class="card-title">Duración promedio de visitas por programa de cuidado</div>
       <div class="card-subtitle">Minutos por visita realizada (solo estado = Realizada). Visitas con múltiples programas cuentan en cada uno.</div>
       <div class="chart-wrapper" style="height:320px;"><canvas id="visitDurationChart"></canvas></div>
+    </div>
+
+    <div class="charts-2col">
+      <div class="card">
+        <div class="card-title">Distribución por programa</div>
+        <div class="card-subtitle">Porcentaje y total de visitas por programa (todos los estados). Clic en un segmento para filtrar.</div>
+        <div class="chart-wrapper" style="height:320px;"><canvas id="visitProgramPieChart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Visitas por estado</div>
+        <div class="card-subtitle">Distribución de Realizada / Fallida / Programada. Clic para filtrar todos los gráficos.</div>
+        <div class="chart-wrapper" style="height:320px;"><canvas id="visitEstadoPieChart"></canvas></div>
+      </div>
     </div>
 
     <div class="card">
@@ -4014,7 +4041,8 @@ function renderAgents() {
 const SAT_LEVELS = ['Mala','Regular','Buena','Excelente','No aplica'];
 const SAT_CLASS = { 'Mala':'sat-mala','Regular':'sat-regular','Buena':'sat-buena','Excelente':'sat-excelente','No aplica':'sat-noaplica' };
 const ESTADO_COLORS = { 'Programada':'#94a3b8', 'Realizada':'#0891b2', 'Fallida':'#dc2626' };
-let visitMonthChart=null, visitDurationChart=null;
+let visitMonthChart=null, visitDurationChart=null, visitProgramPieChart=null, visitEstadoPieChart=null;
+const chartFilter = { estado: null, program: null };
 
 const visitState = { year: new Set(), month: new Set(), program: new Set(), embajadora: new Set(), estado: new Set() };
 
@@ -4219,7 +4247,43 @@ document.addEventListener('click', e => {
 
 
 function filterVisits() {
-  return VISITS.filter(v => FILTER_KEYS.every(fk => matchesFilter(v, fk)));
+  return VISITS.filter(v => {
+    if (!FILTER_KEYS.every(fk => matchesFilter(v, fk))) return false;
+    if (chartFilter.estado && v.estado !== chartFilter.estado) return false;
+    if (chartFilter.program && !v.programs.includes(chartFilter.program)) return false;
+    return true;
+  });
+}
+
+function clearAllFilters() {
+  // Reset dropdown filters
+  for (const fk of FILTER_KEYS) {
+    const meta = VF_META[fk];
+    if (!meta) continue;
+    meta.stateSet.clear();
+    meta.allItems.forEach(it => meta.stateSet.add(it));
+    meta.items = [...meta.allItems];
+    meta.wantsAll = true;
+    renderFilterPanel(fk);
+  }
+  // Reset chart filters
+  chartFilter.estado = null;
+  chartFilter.program = null;
+  updateChartFilterBar();
+  refreshVisitas();
+}
+
+function updateChartFilterBar() {
+  const bar = document.getElementById('chart-filter-bar');
+  if (!bar) return;
+  let html = '';
+  if (chartFilter.estado) {
+    html += `<span class="chart-active-badge">Estado: ${chartFilter.estado}<button onclick="chartFilter.estado=null;updateChartFilterBar();refreshVisitas();">×</button></span>`;
+  }
+  if (chartFilter.program) {
+    html += `<span class="chart-active-badge">Programa: ${chartFilter.program}<button onclick="chartFilter.program=null;updateChartFilterBar();refreshVisitas();">×</button></span>`;
+  }
+  bar.innerHTML = html;
 }
 
 function refreshVisitas() {
@@ -4228,6 +4292,8 @@ function refreshVisitas() {
   renderVisitKPIs(filtered);
   renderVisitMonthChart(filtered);
   renderVisitDurationChart(filtered);
+  renderProgramPieChart(filtered);
+  renderEstadoPieChart(filtered);
   renderEmbajadorasTable(filtered);
   renderMedicosTable(filtered);
   renderSatisfaccionTable(filtered);
@@ -4269,8 +4335,24 @@ function renderVisitMonthChart(filtered) {
   visitMonthChart = new Chart(document.getElementById('visitsByMonthChart'), {
     type:'bar',
     data:{labels, datasets},
-    options: stackedOptions()
+    options: {
+      ...stackedOptions(),
+      onClick(e, els) {
+        if (!els.length) return;
+        const est = datasets[els[0].datasetIndex].label;
+        chartFilter.estado = chartFilter.estado === est ? null : est;
+        updateChartFilterBar();
+        refreshVisitas();
+      },
+      plugins: {
+        ...(stackedOptions().plugins||{}),
+        tooltip: { ...(stackedOptions().plugins?.tooltip||{}),
+          callbacks: { footer: () => 'Clic para filtrar por este estado' }
+        }
+      }
+    }
   });
+  document.getElementById('visitsByMonthChart').style.cursor = 'pointer';
 }
 
 function renderVisitDurationChart(filtered) {
@@ -4309,12 +4391,120 @@ function renderVisitDurationChart(filtered) {
           return `${it.avg.toFixed(1)} min/visita (${formatNumber(it.cnt)} visitas)`;
         }}}
       },
+      onClick(e, els) {
+        if (!els.length) return;
+        const prog = items[els[0].index].name;
+        chartFilter.program = chartFilter.program === prog ? null : prog;
+        updateChartFilterBar();
+        refreshVisitas();
+      },
       scales:{
         x:{beginAtZero:true, grid:{color:'#eee'}, ticks:{callback:v => v+'m'}},
         y:{grid:{display:false}, ticks:{color:'#444', font:{size:11}}}
       }
     }
   });
+  document.getElementById('visitDurationChart').style.cursor = 'pointer';
+}
+
+const PIE_PALETTE = ['#1a3a5c','#2563eb','#0891b2','#059669','#7c3aed','#db2777','#ea580c','#ca8a04','#65a30d','#0e7490'];
+
+function renderProgramPieChart(filtered) {
+  const byProg = {};
+  for (const v of filtered) {
+    for (const p of v.programs) {
+      byProg[p] = (byProg[p]||0) + 1;
+    }
+  }
+  const entries = Object.entries(byProg).sort((a,b)=>b[1]-a[1]);
+  const labels = entries.map(e=>e[0]);
+  const values = entries.map(e=>e[1]);
+  const total = values.reduce((s,x)=>s+x,0);
+  const colors = labels.map((_,i)=> chartFilter.program && labels[i] !== chartFilter.program
+    ? PIE_PALETTE[i%PIE_PALETTE.length]+'66'
+    : PIE_PALETTE[i%PIE_PALETTE.length]);
+  if (visitProgramPieChart) visitProgramPieChart.destroy();
+  visitProgramPieChart = new Chart(document.getElementById('visitProgramPieChart'), {
+    type:'pie',
+    data:{ labels, datasets:[{ data:values, backgroundColor:colors, borderWidth:2, borderColor:'#fff' }] },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      onClick(e,els) {
+        if (!els.length) { chartFilter.program=null; }
+        else { const p=labels[els[0].index]; chartFilter.program = chartFilter.program===p?null:p; }
+        updateChartFilterBar(); refreshVisitas();
+      },
+      plugins:{
+        legend:{ position:'right', labels:{ font:{size:11}, padding:10,
+          generateLabels(chart) {
+            const d = chart.data;
+            return d.labels.map((lbl,i)=>({
+              text: lbl + ' (' + d.datasets[0].data[i] + ')',
+              fillStyle: PIE_PALETTE[i%PIE_PALETTE.length],
+              strokeStyle:'#fff', lineWidth:2, index:i,
+              fontColor: chartFilter.program && lbl!==chartFilter.program?'#aaa':'#1a1a1a'
+            }));
+          }
+        }},
+        tooltip:{ callbacks:{
+          label:(ctx)=>{
+            const pct = total>0?(ctx.parsed/total*100).toFixed(1):'0';
+            return ` ${ctx.label}: ${ctx.parsed} visitas (${pct}%)`;
+          },
+          footer:()=>'Clic para filtrar'
+        }}
+      }
+    }
+  });
+  document.getElementById('visitProgramPieChart').style.cursor='pointer';
+}
+
+function renderEstadoPieChart(filtered) {
+  const byEst = {};
+  for (const v of filtered) byEst[v.estado] = (byEst[v.estado]||0)+1;
+  const entries = Object.entries(byEst).sort((a,b)=>b[1]-a[1]);
+  const labels = entries.map(e=>e[0]);
+  const values = entries.map(e=>e[1]);
+  const total = values.reduce((s,x)=>s+x,0);
+  const EST_COLORS_PIE = {'Realizada':'#0891b2','Fallida':'#dc2626','Programada':'#f59e0b'};
+  const colors = labels.map(l=> {
+    const base = EST_COLORS_PIE[l]||'#888';
+    return chartFilter.estado && l!==chartFilter.estado ? base+'66' : base;
+  });
+  if (visitEstadoPieChart) visitEstadoPieChart.destroy();
+  visitEstadoPieChart = new Chart(document.getElementById('visitEstadoPieChart'), {
+    type:'pie',
+    data:{ labels, datasets:[{ data:values, backgroundColor:colors, borderWidth:2, borderColor:'#fff' }] },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      onClick(e,els) {
+        if (!els.length) { chartFilter.estado=null; }
+        else { const est=labels[els[0].index]; chartFilter.estado = chartFilter.estado===est?null:est; }
+        updateChartFilterBar(); refreshVisitas();
+      },
+      plugins:{
+        legend:{ position:'right', labels:{ font:{size:11}, padding:10,
+          generateLabels(chart) {
+            const d = chart.data;
+            return d.labels.map((lbl,i)=>({
+              text: lbl + ' (' + d.datasets[0].data[i] + ')',
+              fillStyle: EST_COLORS_PIE[lbl]||'#888',
+              strokeStyle:'#fff', lineWidth:2, index:i,
+              fontColor: chartFilter.estado && lbl!==chartFilter.estado?'#aaa':'#1a1a1a'
+            }));
+          }
+        }},
+        tooltip:{ callbacks:{
+          label:(ctx)=>{
+            const pct = total>0?(ctx.parsed/total*100).toFixed(1):'0';
+            return ` ${ctx.label}: ${ctx.parsed} visitas (${pct}%)`;
+          },
+          footer:()=>'Clic para filtrar'
+        }}
+      }
+    }
+  });
+  document.getElementById('visitEstadoPieChart').style.cursor='pointer';
 }
 
 function buildMonthTable(rows, valueGetter, headerCellExtra='') {
